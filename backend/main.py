@@ -1,5 +1,5 @@
 """
-RevCopilot Backend Server - Complete with Web UI
+RevCopilot Backend Server - Complete with Web UI and AI-Assisted Disassembler
 """
 
 import asyncio
@@ -10,7 +10,8 @@ import shutil
 import json
 import urllib.request
 import urllib.error
-from typing import Optional
+import subprocess
+from typing import Optional, List, Dict, Any
 import traceback
 
 try:
@@ -32,8 +33,8 @@ jobs = {}
 
 app = FastAPI(
     title="RevCopilot",
-    description="AI-Powered Reverse Engineering Assistant",
-    version="1.0.0",
+    description="AI-Powered Reverse Engineering Assistant with Disassembler",
+    version="1.1.0",
 )
 
 app.add_middleware(
@@ -116,7 +117,7 @@ def analyze_medium_bin(file_path: str, mode: str = "auto", api_key: Optional[str
                 "model": os.getenv("DARTMOUTH_CHAT_MODEL", "openai.gpt-4.1-mini-2025-04-14"),
                 "messages": [
                     {"role": "system", "content": "You are a reverse engineering assistant analyzing a crackme binary."},
-                    {"role": "user", "content": f"Analyze this crackme binary. It has a 16-byte input that undergoes XOR with 0x05, ROL4 rotation, and XOR-swap mirroring. The target hash is [0xa5, 0xa5, 0xc5, 0x04, 0xe4, 0xa5, 0x35, 0x04, 0x75, 0xa5, 0x44, 0x75, 0x14, 0xc4, 0xd4, 0x24]. Provide detailed insights about the reverse engineering process."},
+                    {"role": "user", "content": "Analyze this crackme binary. It has a 16-byte input that undergoes XOR with 0x05, ROL4 rotation, and XOR-swap mirroring. The target hash is [0xa5, 0xa5, 0xc5, 0x04, 0xe4, 0xa5, 0x35, 0x04, 0x75, 0xa5, 0x44, 0x75, 0x14, 0xc4, 0xd4, 0x24]. Provide detailed insights about the reverse engineering process."},
                 ],
             }
             if api_key and api_url:
@@ -215,7 +216,7 @@ def analyze_generic_binary(file_path: str, mode: str = "auto", api_key: Optional
             angr_solution = _solve_with_angr(file_path, ai_hint=ai_hint)
         except Exception as e:
             angr_error = str(e)
-            logger.warning(f"angr failed: {e}\n{traceback.format_exc()}")
+            logger.warning(f"angr failed: {e}")
     
     result = {
         "solution": angr_solution if angr_solution else None,
@@ -244,51 +245,54 @@ def analyze_generic_binary(file_path: str, mode: str = "auto", api_key: Optional
 
 
 def _solve_with_angr(file_path: str, ai_hint: str = None):
-    import angr
-    import claripy
-    proj = angr.Project(file_path, auto_load_libs=False)
-    input_len = 16
-    argv1 = claripy.BVS('argv1', 8 * input_len)
-    state = proj.factory.full_init_state(args=[file_path, argv1])
-    simgr = proj.factory.simulation_manager(state)
+    try:
+        import angr
+        import claripy
+        proj = angr.Project(file_path, auto_load_libs=False)
+        input_len = 16
+        argv1 = claripy.BVS('argv1', 8 * input_len)
+        state = proj.factory.full_init_state(args=[file_path, argv1])
+        simgr = proj.factory.simulation_manager(state)
 
-    # Robustly scan for 'correct'/'success' and 'fail'/'incorrect' addresses
-    def find_addr_by_string(targets):
-        addrs = set()
-        try:
-            for backer in getattr(proj.loader.memory, '_backers', []):
-                # backer can be (addr, size, bytes) or (addr, bytes)
-                if len(backer) == 3:
-                    addr, _, s = backer
-                elif len(backer) == 2:
-                    addr, s = backer
-                else:
-                    continue
-                for t in targets:
-                    if t in s:
-                        addrs.add(addr)
-        except Exception as e:
-            pass
-        return list(addrs)
+        # Robustly scan for 'correct'/'success' and 'fail'/'incorrect' addresses
+        def find_addr_by_string(targets):
+            addrs = set()
+            try:
+                for backer in getattr(proj.loader.memory, '_backers', []):
+                    # backer can be (addr, size, bytes) or (addr, bytes)
+                    if len(backer) == 3:
+                        addr, _, s = backer
+                    elif len(backer) == 2:
+                        addr, s = backer
+                    else:
+                        continue
+                    for t in targets:
+                        if t in s:
+                            addrs.add(addr)
+            except Exception as e:
+                pass
+            return list(addrs)
 
-    success_addrs = find_addr_by_string([b'correct', b'success', b'win', b'congrats'])
-    fail_addrs = find_addr_by_string([b'fail', b'incorrect', b'try again', b'error'])
+        success_addrs = find_addr_by_string([b'correct', b'success', b'win', b'congrats'])
+        fail_addrs = find_addr_by_string([b'fail', b'incorrect', b'try again', b'error'])
 
-    # If AI hint is provided, try to use it to guide angr (future extension)
-    # For now, just log it
-    if ai_hint:
-        logger.info(f"AI hint for angr: {ai_hint}")
+        # If AI hint is provided, try to use it to guide angr (future extension)
+        # For now, just log it
+        if ai_hint:
+            logger.info(f"AI hint for angr: {ai_hint}")
 
-    # Prefer to find success, avoid fail
-    if success_addrs:
-        simgr.explore(find=success_addrs, avoid=fail_addrs)
-    else:
-        simgr.explore()
+        # Prefer to find success, avoid fail
+        if success_addrs:
+            simgr.explore(find=success_addrs, avoid=fail_addrs)
+        else:
+            simgr.explore()
 
-    if simgr.found:
-        found = simgr.found[0]
-        val = found.solver.eval(argv1, cast_to=bytes)
-        return [val.decode(errors='ignore'), None]
+        if simgr.found:
+            found = simgr.found[0]
+            val = found.solver.eval(argv1, cast_to=bytes)
+            return [val.decode(errors='ignore'), None]
+    except Exception as e:
+        logger.error(f"angr failed: {e}")
     return None
 
 def analyze_binary(file_path: str, mode: str = "auto", api_key: Optional[str] = None, api_url: Optional[str] = None):
@@ -327,7 +331,7 @@ def analyze_binary(file_path: str, mode: str = "auto", api_key: Optional[str] = 
     
     return results
 
-def _extract_ascii_strings(file_path: str, min_len: int = 4, max_strings: int = 200) -> list[str]:
+def _extract_ascii_strings(file_path: str, min_len: int = 4, max_strings: int = 200) -> List[str]:
     strings = []
     try:
         with open(file_path, 'rb') as f:
@@ -348,7 +352,7 @@ def _extract_ascii_strings(file_path: str, min_len: int = 4, max_strings: int = 
         logger.warning(f"Failed to extract strings: {e}")
     return strings
 
-def _build_generic_tutor_hints() -> list[str]:
+def _build_generic_tutor_hints() -> List[str]:
     return [
         "Start by checking how many command-line arguments are required.",
         "Look for input length checks and comparisons that gate success paths.",
@@ -356,8 +360,8 @@ def _build_generic_tutor_hints() -> list[str]:
         "Use strings output to locate error/success messages and work backward.",
     ]
 
-def _heuristic_tutor_hints(file_path: str, results: dict) -> list[str]:
-    hints: list[str] = []
+def _heuristic_tutor_hints(file_path: str, results: dict) -> List[str]:
+    hints: List[str] = []
     strings = _extract_ascii_strings(file_path)
     lower = [s.lower() for s in strings]
 
@@ -389,10 +393,10 @@ def _heuristic_tutor_hints(file_path: str, results: dict) -> list[str]:
 
     return hints[:6]
 
-def _extract_hints_from_text(text: str) -> list[str]:
+def _extract_hints_from_text(text: str) -> List[str]:
     if not text:
         return []
-    hints: list[str] = []
+    hints: List[str] = []
     for line in text.splitlines():
         cleaned = line.strip()
         if not cleaned:
@@ -402,7 +406,7 @@ def _extract_hints_from_text(text: str) -> list[str]:
             hints.append(cleaned)
     return hints[:6]
 
-def _build_tutor_ai_payload(results: dict, strings_sample: list[str]) -> dict:
+def _build_tutor_ai_payload(results: dict, strings_sample: List[str]) -> dict:
     summary = {
         "file_info": results.get("file_info"),
         "analysis": results.get("analysis"),
@@ -423,7 +427,7 @@ def _build_tutor_ai_payload(results: dict, strings_sample: list[str]) -> dict:
         ],
     }
 
-def _build_tutor_hints(file_path: str, results: dict, api_key: Optional[str] = None, api_url: Optional[str] = None) -> list[str]:
+def _build_tutor_hints(file_path: str, results: dict, api_key: Optional[str] = None, api_url: Optional[str] = None) -> List[str]:
     heuristic = _heuristic_tutor_hints(file_path, results)
 
     effective_key = _resolve_dartmouth_key(api_key)
@@ -448,8 +452,184 @@ def _build_tutor_hints(file_path: str, results: dict, api_key: Optional[str] = N
 
     return _build_generic_tutor_hints()
 
+# ==================== DISASSEMBLER FUNCTIONS ====================
+
+def get_binary_functions(binary_path: str) -> List[Dict]:
+    """Extract function list from binary using objdump or radare2."""
+    functions = []
+    
+    # Try using objdump first
+    try:
+        cmd = ["objdump", "-t", binary_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        
+        for line in result.stdout.split('\n'):
+            if ' F ' in line and '.text' in line:  # Function in .text section
+                parts = line.split()
+                if len(parts) >= 6:
+                    address = parts[0]
+                    name = parts[-1]
+                    if not name.startswith('.'):  # Skip internal names
+                        functions.append({
+                            "address": address,
+                            "name": name,
+                            "size": "unknown"
+                        })
+    except Exception as e:
+        logger.warning(f"objdump failed: {e}")
+    
+    # If no functions found or objdump failed, try nm
+    if not functions:
+        try:
+            cmd = ["nm", binary_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            
+            for line in result.stdout.split('\n'):
+                if ' T ' in line:  # Text (code) symbols
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        address = parts[0]
+                        name = parts[2]
+                        functions.append({
+                            "address": address,
+                            "name": name,
+                            "size": "unknown"
+                        })
+        except Exception as e:
+            logger.warning(f"nm failed: {e}")
+    
+    # Sort by address
+    try:
+        functions.sort(key=lambda x: int(x['address'], 16) if x['address'] and x['address'].isdigit() else 0)
+    except:
+        pass
+    
+    # Limit to reasonable number
+    return functions[:50]
+
+def disassemble_function(binary_path: str, function_name: str = None, address: str = None) -> str:
+    """Disassemble a specific function or address."""
+    if function_name:
+        # Try objdump with function name
+        try:
+            cmd = ["objdump", "-d", "--disassemble=" + function_name, binary_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.stdout and "Disassembly of section" in result.stdout:
+                return result.stdout
+        except Exception as e:
+            logger.warning(f"objdump with function name failed: {e}")
+    
+    if address:
+        # Use objdump with address range
+        try:
+            # Try to get 200 bytes after the address
+            start_addr = int(address, 16) if address.startswith('0x') else int(address, 16)
+            end_addr = start_addr + 200
+            cmd = ["objdump", "-d", f"--start-address={hex(start_addr)}", 
+                   f"--stop-address={hex(end_addr)}", binary_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.stdout:
+                return result.stdout[:5000]  # Limit output
+        except Exception as e:
+            logger.warning(f"objdump with address failed: {e}")
+    
+    # Fallback: disassemble entire .text section
+    try:
+        cmd = ["objdump", "-d", binary_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return result.stdout[:3000]  # Limit output
+    except Exception as e:
+        return f"Error disassembling: {str(e)}\n\nYou may need to install binutils: sudo apt-get install binutils"
+
+def analyze_code_with_ai(disassembly: str, question: str = None, api_key: str = None, api_url: str = None) -> str:
+    """Use AI to analyze disassembled code."""
+    if not disassembly:
+        return "No disassembly provided for analysis."
+    
+    # Truncate disassembly if too long
+    if len(disassembly) > 4000:
+        disassembly = disassembly[:4000] + "\n[...truncated...]"
+    
+    if question:
+        prompt = f"""Disassembled code:
+{disassembly}
+
+Question: {question}
+
+Please analyze this assembly code and answer the question."""
+    else:
+        prompt = f"""Disassembled code:
+{disassembly}
+
+Please analyze this assembly code. Explain:
+1. What this function does
+2. Key instructions and their purpose
+3. Potential vulnerabilities or interesting patterns
+4. Suggestions for further analysis"""
+
+    if api_key and api_url:
+        try:
+            payload = {
+                "model": os.getenv("DARTMOUTH_CHAT_MODEL", "openai.gpt-4.1-mini-2025-04-14"),
+                "messages": [
+                    {"role": "system", "content": "You are a reverse engineering expert. Analyze assembly code and provide helpful explanations for students."},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            result = _call_dartmouth_chat(payload, api_key, api_url)
+            if isinstance(result, dict):
+                return result.get("insights", "AI analysis complete.")
+            return str(result)
+        except Exception as e:
+            return f"AI analysis failed: {str(e)}"
+    
+    return "AI analysis requires API credentials."
+
+def find_vulnerabilities(disassembly: str, api_key: str = None, api_url: str = None) -> str:
+    """Use AI to find potential vulnerabilities."""
+    if not disassembly:
+        return "No disassembly provided."
+    
+    if len(disassembly) > 3000:
+        disassembly = disassembly[:3000] + "\n[...truncated...]"
+    
+    prompt = f"""Disassembled code:
+{disassembly}
+
+Analyze this code for security vulnerabilities. Look for:
+1. Buffer overflows
+2. Integer overflows
+3. Use-after-free
+4. Format string vulnerabilities
+5. Missing bounds checks
+6. Unsafe function calls (strcpy, gets, etc.)
+7. Other common vulnerabilities
+
+Provide a detailed analysis with specific line references."""
+
+    if api_key and api_url:
+        try:
+            payload = {
+                "model": os.getenv("DARTMOUTH_CHAT_MODEL", "openai.gpt-4.1-mini-2025-04-14"),
+                "messages": [
+                    {"role": "system", "content": "You are a security researcher. Find vulnerabilities in assembly code."},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+            result = _call_dartmouth_chat(payload, api_key, api_url)
+            if isinstance(result, dict):
+                return result.get("insights", "Vulnerability analysis complete.")
+            return str(result)
+        except Exception as e:
+            return f"Vulnerability analysis failed: {str(e)}"
+    
+    return "AI analysis requires API credentials."
+
+# ==================== AI INTEGRATION FUNCTIONS ====================
+
 try:
     from langchain_dartmouth.llms import ChatDartmouth
+    ChatDartmouth = ChatDartmouth
 except Exception:
     ChatDartmouth = None
 
@@ -496,7 +676,7 @@ def _parse_chat_response(data: dict) -> str:
             return data.get("content", "")
     return ""
 
-def _render_chat_prompt(messages: list[dict]) -> str:
+def _render_chat_prompt(messages: List[dict]) -> str:
     return "\n".join([f"{m.get('role','user').upper()}: {m.get('content','')}" for m in messages])
 
 def _call_dartmouth_chat(payload: dict, api_key: Optional[str] = None, api_url: Optional[str] = None) -> dict:
@@ -622,9 +802,9 @@ async def process_analysis(job_id: str, path: str, mode: str, api_key: Optional[
         jobs[job_id]["status"] = "error"
         jobs[job_id]["error"] = str(e)
     finally:
-        cleanup_file(path)
-        if "temp_path" in jobs[job_id]:
-            del jobs[job_id]["temp_path"]
+        # Don't cleanup file yet - disassembler needs it
+        # cleanup_file(path)
+        pass
 
 # ==================== API ENDPOINTS ====================
 
@@ -709,7 +889,7 @@ async def test_solution():
             "arg1": "GHIDRA_REV_KEY__",
             "arg2": "TR_C31NG_KEY_2__",
         },
-        "command": f"./medium.bin 'GHIDRA_REV_KEY__' 'TR_C31NG_KEY_2__'"
+        "command": "./medium.bin 'GHIDRA_REV_KEY__' 'TR_C31NG_KEY_2__'"
     }
 
 @app.post("/api/ai/health")
@@ -726,6 +906,76 @@ async def ai_health(
     payload = _build_ai_health_payload()
     result = await asyncio.to_thread(_call_dartmouth_chat, payload, effective_key, effective_url)
     return {"status": "ok", "details": result}
+
+# ==================== DISASSEMBLER ENDPOINTS ====================
+
+@app.post("/api/disassembler/functions")
+async def get_functions_endpoint(
+    job_id: str = Form(...),
+    dartmouth_api_key: Optional[str] = Header(default=None, alias="X-Dartmouth-API-Key"),
+):
+    """Get list of functions from binary."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    binary_path = jobs[job_id].get("temp_path")
+    if not binary_path or not os.path.exists(binary_path):
+        raise HTTPException(status_code=400, detail="Binary not available")
+    
+    functions = get_binary_functions(binary_path)
+    return {"functions": functions}
+
+@app.post("/api/disassembler/disassemble")
+async def disassemble_endpoint(
+    job_id: str = Form(...),
+    function_name: Optional[str] = Form(None),
+    address: Optional[str] = Form(None),
+):
+    """Disassemble a function or address."""
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    binary_path = jobs[job_id].get("temp_path")
+    if not binary_path or not os.path.exists(binary_path):
+        raise HTTPException(status_code=400, detail="Binary not available")
+    
+    disassembly = disassemble_function(binary_path, function_name, address)
+    return {"disassembly": disassembly}
+
+@app.post("/api/disassembler/analyze")
+async def analyze_disassembly_endpoint(
+    job_id: str = Form(...),
+    disassembly: str = Form(...),
+    question: Optional[str] = Form(None),
+    dartmouth_api_key: Optional[str] = Header(default=None, alias="X-Dartmouth-API-Key"),
+    dartmouth_api_url: Optional[str] = Header(default=None, alias="X-Dartmouth-API-Url"),
+):
+    """Use AI to analyze disassembled code."""
+    if not disassembly:
+        raise HTTPException(status_code=400, detail="No disassembly provided")
+    
+    effective_key = _resolve_dartmouth_key(dartmouth_api_key)
+    effective_url = _resolve_dartmouth_url(dartmouth_api_url)
+    
+    analysis = analyze_code_with_ai(disassembly, question, effective_key, effective_url)
+    return {"analysis": analysis}
+
+@app.post("/api/disassembler/find_vulns")
+async def find_vulnerabilities_endpoint(
+    job_id: str = Form(...),
+    disassembly: str = Form(...),
+    dartmouth_api_key: Optional[str] = Header(default=None, alias="X-Dartmouth-API-Key"),
+    dartmouth_api_url: Optional[str] = Header(default=None, alias="X-Dartmouth-API-Url"),
+):
+    """Use AI to find vulnerabilities in disassembled code."""
+    if not disassembly:
+        raise HTTPException(status_code=400, detail="No disassembly provided")
+    
+    effective_key = _resolve_dartmouth_key(dartmouth_api_key)
+    effective_url = _resolve_dartmouth_url(dartmouth_api_url)
+    
+    vulns = find_vulnerabilities(disassembly, effective_key, effective_url)
+    return {"vulnerabilities": vulns}
 
 # ==================== AI CHAT ENDPOINT ====================
 
@@ -803,281 +1053,661 @@ async def ai_chat(
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     """Serve the main web interface."""
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>RevCopilot</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-        <style>
-            .gradient-bg { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
-            .result-box { transition: all 0.3s ease; }
-            .result-box:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
-            .loader { border-top-color: #3498db; animation: spin 1s ease-in-out infinite; }
-            @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        </style>
-    </head>
-    <body class="bg-gray-50 min-h-screen">
-        <div class="gradient-bg text-white py-8">
-            <div class="container mx-auto px-4">
-                <h1 class="text-4xl font-bold mb-2"><i class="fas fa-lock"></i> RevCopilot</h1>
-                <p class="text-xl opacity-90">AI-Powered Reverse Engineering Assistant</p>
-                <p class="text-sm opacity-75 mt-2">Upload a binary to analyze and solve crackmes</p>
+    html_content = """<!DOCTYPE html>
+<html>
+<head>
+    <title>RevCopilot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .gradient-bg { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .result-box { transition: all 0.3s ease; }
+        .result-box:hover { transform: translateY(-2px); box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+        .loader { border-top-color: #3498db; animation: spin 1s ease-in-out infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .function-item.selected { background-color: #dbeafe; border-color: #93c5fd; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <div class="gradient-bg text-white py-8">
+        <div class="container mx-auto px-4">
+            <h1 class="text-4xl font-bold mb-2"><i class="fas fa-lock"></i> RevCopilot</h1>
+            <p class="text-xl opacity-90">AI-Powered Reverse Engineering Assistant</p>
+            <p class="text-sm opacity-75 mt-2">Upload a binary to analyze and solve crackmes</p>
+        </div>
+    </div>
+
+    <div class="container mx-auto px-4 py-8">
+        <div class="mb-8 p-4 bg-yellow-100 border-l-4 border-yellow-400 rounded">
+            <div class="flex items-center gap-3 mb-1">
+                <span class="text-yellow-600 text-xl"><i class="fas fa-exclamation-triangle"></i></span>
+                <span class="font-semibold text-yellow-800">Limitations of Automated Analysis</span>
+            </div>
+            <div class="text-yellow-900 text-sm mt-1">
+                <ul class="list-disc ml-6">
+                    <li>No tool (including angr) can automatically solve all binaries. Complex, obfuscated, or protected binaries may require manual reverse engineering.</li>
+                    <li>For best results, use CTF-style crackmes or simple input-checking binaries.</li>
+                    <li>For advanced analysis, use tools like Ghidra, IDA Pro, Binary Ninja, or radare2 alongside this platform.</li>
+                    <li>AI/LLM features can assist with code understanding, but cannot guarantee a solution for every binary.</li>
+                </ul>
             </div>
         </div>
-
-        <div class="container mx-auto px-4 py-8">
-            <div class="mb-8 p-4 bg-yellow-100 border-l-4 border-yellow-400 rounded">
-                <div class="flex items-center gap-3 mb-1">
-                    <span class="text-yellow-600 text-xl"><i class="fas fa-exclamation-triangle"></i></span>
-                    <span class="font-semibold text-yellow-800">Limitations of Automated Analysis</span>
-                </div>
-                <div class="text-yellow-900 text-sm mt-1">
-                    <ul class="list-disc ml-6">
-                        <li>No tool (including angr) can automatically solve all binaries. Complex, obfuscated, or protected binaries may require manual reverse engineering.</li>
-                        <li>For best results, use CTF-style crackmes or simple input-checking binaries.</li>
-                        <li>For advanced analysis, use tools like Ghidra, IDA Pro, Binary Ninja, or radare2 alongside this platform.</li>
-                        <li>AI/LLM features can assist with code understanding, but cannot guarantee a solution for every binary.</li>
-                    </ul>
-                </div>
-            </div>
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <!-- Left Column -->
-                <div class="space-y-6">
-                    <div class="bg-white rounded-xl shadow-lg p-6">
-                        <h2 class="text-2xl font-bold text-gray-800 mb-4"><i class="fas fa-upload mr-2"></i>Upload Binary</h2>
-                        
-                        <input type="file" id="fileInput" class="sr-only" accept="*/*">
-                        <label for="fileInput" id="uploadArea" class="border-4 border-dashed border-gray-300 rounded-2xl p-8 text-center cursor-pointer hover:border-blue-400 transition-colors block">
-                            <div class="text-5xl mb-4"><i class="fas fa-file-code"></i></div>
-                            <p class="text-xl font-semibold text-gray-700">Drag & drop a binary file</p>
-                            <p class="text-gray-500 mt-2">or click to browse</p>
-                            <p class="text-sm text-gray-400 mt-4">Supports ELF, PE, Mach-O formats</p>
-                        </label>
-                        
-                        <div class="mt-4 text-sm text-gray-600 space-y-1">
-                            <div id="fileStatus">No file selected</div>
-                        </div>
-
-                        <div class="mt-6">
-                            <h3 class="text-lg font-semibold text-gray-800 mb-3"><i class="fas fa-cogs mr-2"></i>Analysis Mode</h3>
-                            <div class="mb-3">
-                                <label class="block text-sm text-gray-600 mb-1" for="apiUrlInput">Dartmouth API URL</label>
-                                <input id="apiUrlInput" type="text" placeholder="https://chat.dartmouth.edu/api" class="w-full px-3 py-2 border rounded-lg text-sm">
-                            </div>
-                            <div class="mb-3">
-                                <label class="block text-sm text-gray-600 mb-1" for="apiKeyInput">Dartmouth API Key</label>
-                                <input id="apiKeyInput" type="password" placeholder="Enter API key" class="w-full px-3 py-2 border rounded-lg text-sm">
-                            </div>
-                            <div class="flex items-center gap-3 mb-3">
-                                <button id="aiHealthBtn" type="button" class="px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200">
-                                    Test Dartmouth API
-                                </button>
-                                <span id="aiHealthStatus" class="text-xs text-gray-500">Not tested</span>
-                            </div>
-                            <div class="grid grid-cols-3 gap-3">
-                                <button data-mode="auto" class="mode-btn p-4 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 text-white font-semibold hover:opacity-90 transition-opacity">
-                                    <i class="fas fa-bolt mr-2"></i>Auto
-                                </button>
-                                <button data-mode="ai" class="mode-btn p-4 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 text-white font-semibold hover:opacity-90 transition-opacity">
-                                    <i class="fas fa-brain mr-2"></i>AI
-                                </button>
-                                <button data-mode="tutor" class="mode-btn p-4 rounded-lg bg-gradient-to-br from-purple-500 to-pink-600 text-white font-semibold hover:opacity-90 transition-opacity">
-                                    <i class="fas fa-graduation-cap mr-2"></i>Tutor
-                                </button>
-                            </div>
-                        </div>
-                        
-                        <button id="analyzeBtn" class="w-full mt-6 py-4 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed" disabled>
-                            <i class="fas fa-play mr-2"></i>Start Analysis
-                        </button>
-                    </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <!-- Left Column -->
+            <div class="space-y-6">
+                <div class="bg-white rounded-xl shadow-lg p-6">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-4"><i class="fas fa-upload mr-2"></i>Upload Binary</h2>
                     
-                    <div id="statusBox" class="hidden bg-white rounded-xl shadow-lg p-6">
-                        <h3 class="text-xl font-bold text-gray-800 mb-4"><i class="fas fa-spinner fa-spin mr-2"></i>Analysis Status</h3>
-                        <div class="space-y-4">
-                            <div class="flex items-center">
-                                <div id="statusIndicator" class="h-3 w-3 rounded-full bg-yellow-500 animate-ping mr-3"></div>
-                                <span id="statusText" class="font-medium">Processing...</span>
-                            </div>
-                            <div id="progressBar" class="h-2 bg-gray-200 rounded-full overflow-hidden">
-                                <div class="h-full bg-gradient-to-r from-blue-500 to-purple-500 w-0 transition-all duration-300"></div>
-                            </div>
-                        </div>
+                    <input type="file" id="fileInput" class="sr-only" accept="*/*">
+                    <label for="fileInput" id="uploadArea" class="border-4 border-dashed border-gray-300 rounded-2xl p-8 text-center cursor-pointer hover:border-blue-400 transition-colors block">
+                        <div class="text-5xl mb-4"><i class="fas fa-file-code"></i></div>
+                        <p class="text-xl font-semibold text-gray-700">Drag & drop a binary file</p>
+                        <p class="text-gray-500 mt-2">or click to browse</p>
+                        <p class="text-sm text-gray-400 mt-4">Supports ELF, PE, Mach-O formats</p>
+                    </label>
+                    
+                    <div class="mt-4 text-sm text-gray-600 space-y-1">
+                        <div id="fileStatus">No file selected</div>
                     </div>
-                </div>
 
-                <!-- Right Column -->
-                <div class="space-y-6">
-                    <div id="resultsBox" class="hidden bg-white rounded-xl shadow-lg p-6">
-                        <h2 class="text-2xl font-bold text-gray-800 mb-4"><i class="fas fa-chart-bar mr-2"></i>Analysis Results</h2>
-                        
-                        <div id="solutionSection" class="hidden mb-6">
-                            <div class="bg-gradient-to-br from-green-50 to-emerald-100 border border-green-200 rounded-xl p-5">
-                                <div class="flex items-center mb-3">
-                                    <div class="text-2xl mr-3"><i class="fas fa-key"></i></div>
-                                    <h3 class="text-lg font-bold text-gray-800">Solution Found!</h3>
-                                </div>
-                                <div class="font-mono bg-gray-900 text-green-400 p-4 rounded-lg text-sm overflow-x-auto mb-3">
-                                    <span id="solutionCommand"></span>
-                                </div>
-                                <button id="copyBtn" class="w-full py-3 bg-gradient-to-r from-green-600 to-emerald-600 text-white font-semibold rounded-lg hover:opacity-90 transition-opacity">
-                                    <i class="fas fa-copy mr-2"></i>Copy Command
-                                </button>
-                            </div>
+                    <div class="mt-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-3"><i class="fas fa-cogs mr-2"></i>Analysis Mode</h3>
+                        <div class="mb-3">
+                            <label class="block text-sm text-gray-600 mb-1" for="apiUrlInput">Dartmouth API URL</label>
+                            <input id="apiUrlInput" type="text" placeholder="https://chat.dartmouth.edu/api" class="w-full px-3 py-2 border rounded-lg text-sm">
                         </div>
-                        
-                        <div id="analysisDetails" class="space-y-4"></div>
-                                                <!-- Persistent AI Chat Section -->
-                                                <div id="aiChatSection" class="p-4 bg-indigo-50 rounded-xl border border-indigo-200">
-                                                    <h4 class="font-bold text-lg mb-3 flex items-center gap-2"><i class="fas fa-robot text-indigo-600"></i>AI Chat Assistant</h4>
-                                                    <div id="aiChatHistory" class="mb-3 max-h-64 overflow-y-auto space-y-2 pr-1"></div>
-                                                    <form id="aiChatForm" class="flex gap-2 mt-2">
-                                                        <input id="aiUserPrompt" type="text" autocomplete="off" class="flex-1 px-3 py-2 border rounded-lg text-sm" placeholder="Type your question or command..." />
-                                                        <button id="aiSendBtn" type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700">Send</button>
-                                                    </form>
-                                                </div>
-                            <!-- Results will appear here -->
+                        <div class="mb-3">
+                            <label class="block text-sm text-gray-600 mb-1" for="apiKeyInput">Dartmouth API Key</label>
+                            <input id="apiKeyInput" type="password" placeholder="Enter API key" class="w-full px-3 py-2 border rounded-lg text-sm">
+                        </div>
+                        <div class="flex items-center gap-3 mb-3">
+                            <button id="aiHealthBtn" type="button" class="px-3 py-2 text-sm bg-gray-100 rounded-lg hover:bg-gray-200">
+                                Test Dartmouth API
+                            </button>
+                            <span id="aiHealthStatus" class="text-xs text-gray-500">Not tested</span>
+                        </div>
+                        <div class="grid grid-cols-3 gap-3">
+                            <button data-mode="auto" class="mode-btn p-4 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 text-white font-semibold hover:opacity-90 transition-opacity">
+                                <i class="fas fa-bolt mr-2"></i>Auto
+                            </button>
+                            <button data-mode="ai" class="mode-btn p-4 rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 text-white font-semibold hover:opacity-90 transition-opacity">
+                                <i class="fas fa-brain mr-2"></i>AI
+                            </button>
+                            <button data-mode="tutor" class="mode-btn p-4 rounded-lg bg-gradient-to-br from-purple-500 to-pink-600 text-white font-semibold hover:opacity-90 transition-opacity">
+                                <i class="fas fa-graduation-cap mr-2"></i>Tutor
+                            </button>
                         </div>
                     </div>
                     
-                    <div id="emptyState" class="bg-white rounded-xl shadow-lg p-12 text-center">
-                        <div class="text-6xl mb-6"><i class="fas fa-search"></i></div>
-                        <h3 class="text-2xl font-bold text-gray-800 mb-3">Upload a Binary to Begin</h3>
-                        <p class="text-gray-600">RevCopilot will analyze the binary and attempt to find the correct inputs.</p>
-                        <p class="text-sm text-gray-500 mt-4">Try uploading <code>medium.bin</code> from the test_data folder</p>
-                    </div>
+                    <button id="analyzeBtn" class="w-full mt-6 py-4 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                        <i class="fas fa-play mr-2"></i>Start Analysis
+                    </button>
                 </div>
-            </div>
-        </div>
-
-        <footer class="mt-12 border-t border-gray-200 bg-white py-8">
-            <div class="container mx-auto px-4 text-center text-gray-600">
-                <p><i class="fas fa-code mr-2"></i>RevCopilot • Dartmouth CS 169 Lab 4</p>
-                <p class="text-sm mt-2">Educational use only. Do not use on software you don't own.</p>
-            </div>
-        </footer>
-
-        <script>
-            document.addEventListener('DOMContentLoaded', () => {
-                // Interactive AI Chat logic - FIXED VERSION
-                const aiChatForm = document.getElementById('aiChatForm');
-                const aiUserPrompt = document.getElementById('aiUserPrompt');
-                const aiChatHistory = document.getElementById('aiChatHistory');
-                let aiChatMessages = [];
-                let lastJobId = null;
                 
-                function getCurrentJobId() {
+                <!-- AI-Assisted Disassembler Section -->
+                <div id="disassemblerSection" class="hidden bg-white rounded-xl shadow-lg p-6">
+                    <h3 class="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                        <i class="fas fa-microscope text-blue-600"></i> AI-Assisted Disassembler
+                        <span class="ml-auto text-sm font-normal">
+                            <span id="disasmStatus" class="px-2 py-1 bg-blue-100 text-blue-800 rounded">Ready</span>
+                        </span>
+                    </h3>
+                    
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <!-- Left: Function List -->
+                        <div class="lg:col-span-1">
+                            <div class="mb-4">
+                                <label class="block text-sm font-medium text-gray-700 mb-2">
+                                    <i class="fas fa-code-branch mr-1"></i> Functions
+                                </label>
+                                <div class="relative">
+                                    <input type="text" id="functionSearch" placeholder="Search functions..." 
+                                           class="w-full px-3 py-2 border rounded-lg text-sm mb-2">
+                                    <div id="functionList" class="h-64 overflow-y-auto border rounded-lg p-2 bg-gray-50">
+                                        <!-- Functions will be populated here -->
+                                        <div class="text-center py-8 text-gray-500">
+                                            <i class="fas fa-spinner fa-spin mb-2"></i>
+                                            <p>Loading functions...</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="space-y-3">
+                                <button id="analyzeMainBtn" class="w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm">
+                                    <i class="fas fa-search mr-2"></i> Analyze main()
+                                </button>
+                                <button id="findVulnsBtn" class="w-full px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm">
+                                    <i class="fas fa-bug mr-2"></i> Find Vulnerabilities
+                                </button>
+                                <button id="explainCodeBtn" class="w-full px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 text-sm">
+                                    <i class="fas fa-graduation-cap mr-2"></i> Explain This Code
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <!-- Middle: Disassembly View -->
+                        <div class="lg:col-span-2">
+                            <div class="mb-4">
+                                <div class="flex justify-between items-center mb-2">
+                                    <label class="block text-sm font-medium text-gray-700">
+                                        <i class="fas fa-file-code mr-1"></i> Disassembly
+                                    </label>
+                                    <div class="flex gap-2">
+                                        <button id="copyDisasmBtn" class="px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300">
+                                            <i class="fas fa-copy mr-1"></i> Copy
+                                        </button>
+                                        <button id="refreshDisasmBtn" class="px-3 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300">
+                                            <i class="fas fa-redo mr-1"></i> Refresh
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="disassemblyView" class="h-96 font-mono text-sm bg-gray-900 text-gray-300 rounded-lg p-4 overflow-auto">
+                                    <div class="text-center py-16 text-gray-500">
+                                        <i class="fas fa-file-code text-3xl mb-4"></i>
+                                        <p>Select a function to view disassembly</p>
+                                        <p class="text-xs mt-2">Or click "Analyze main()" to start</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <!-- AI Analysis Panel -->
+                            <div id="aiAnalysisPanel" class="hidden">
+                                <div class="flex items-center gap-2 mb-2">
+                                    <i class="fas fa-robot text-indigo-600"></i>
+                                    <label class="block text-sm font-medium text-gray-700">AI Analysis</label>
+                                    <span class="ml-auto text-xs text-gray-500">Powered by Dartmouth AI</span>
+                                </div>
+                                <div id="aiAnalysisOutput" class="h-48 overflow-y-auto p-3 bg-indigo-50 rounded-lg border border-indigo-200">
+                                    <!-- AI analysis will appear here -->
+                                </div>
+                                <div class="mt-2 flex gap-2">
+                                    <input type="text" id="aiQuestionInput" placeholder="Ask about this code..." 
+                                           class="flex-1 px-3 py-2 border rounded-lg text-sm">
+                                    <button id="askAIBtn" class="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm">
+                                        <i class="fas fa-paper-plane"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="statusBox" class="hidden bg-white rounded-xl shadow-lg p-6">
+                    <h3 class="text-xl font-bold text-gray-800 mb-4"><i class="fas fa-spinner fa-spin mr-2"></i>Analysis Status</h3>
+                    <div class="space-y-4">
+                        <div class="flex items-center">
+                            <div id="statusIndicator" class="h-3 w-3 rounded-full bg-yellow-500 animate-ping mr-3"></div>
+                            <span id="statusText" class="font-medium">Processing...</span>
+                        </div>
+                        <div id="progressBar" class="h-2 bg-gray-200 rounded-full overflow-hidden">
+                            <div class="h-full bg-gradient-to-r from-blue-500 to-purple-500 w-0 transition-all duration-300"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column -->
+            <div class="space-y-6">
+                <div id="resultsBox" class="hidden bg-white rounded-xl shadow-lg p-6">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-4"><i class="fas fa-chart-bar mr-2"></i>Analysis Results</h2>
+                    
+                    <div id="solutionSection" class="hidden mb-6">
+                        <div class="bg-gradient-to-br from-green-50 to-emerald-100 border border-green-200 rounded-xl p-5">
+                            <div class="flex items-center mb-3">
+                                <div class="text-2xl mr-3"><i class="fas fa-key"></i></div>
+                                <h3 class="text-lg font-bold text-gray-800">Solution Found!</h3>
+                            </div>
+                            <div class="font-mono bg-gray-900 text-green-400 p-4 rounded-lg text-sm overflow-x-auto mb-3">
+                                <span id="solutionCommand"></span>
+                            </div>
+                            <button id="copyBtn" class="w-full py-3 bg-gradient-to-r from-green-600 to-emerald-600 text-white font-semibold rounded-lg hover:opacity-90 transition-opacity">
+                                <i class="fas fa-copy mr-2"></i>Copy Command
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div id="analysisDetails" class="space-y-4"></div>
+                    
+                    <!-- Persistent AI Chat Section -->
+                    <div id="aiChatSection" class="p-4 bg-indigo-50 rounded-xl border border-indigo-200">
+                        <h4 class="font-bold text-lg mb-3 flex items-center gap-2"><i class="fas fa-robot text-indigo-600"></i>AI Chat Assistant</h4>
+                        <div id="aiChatHistory" class="mb-3 max-h-64 overflow-y-auto space-y-2 pr-1"></div>
+                        <form id="aiChatForm" class="flex gap-2 mt-2">
+                            <input id="aiUserPrompt" type="text" autocomplete="off" class="flex-1 px-3 py-2 border rounded-lg text-sm" placeholder="Type your question or command..." />
+                            <button id="aiSendBtn" type="submit" class="px-4 py-2 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700">Send</button>
+                        </form>
+                    </div>
+                </div>
+                
+                <div id="emptyState" class="bg-white rounded-xl shadow-lg p-12 text-center">
+                    <div class="text-6xl mb-6"><i class="fas fa-search"></i></div>
+                    <h3 class="text-2xl font-bold text-gray-800 mb-3">Upload a Binary to Begin</h3>
+                    <p class="text-gray-600">RevCopilot will analyze the binary and attempt to find the correct inputs.</p>
+                    <p class="text-sm text-gray-500 mt-4">Try uploading <code>medium.bin</code> from the test_data folder</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer class="mt-12 border-t border-gray-200 bg-white py-8">
+        <div class="container mx-auto px-4 text-center text-gray-600">
+            <p><i class="fas fa-code mr-2"></i>RevCopilot • Dartmouth CS 169 Lab 4</p>
+            <p class="text-sm mt-2">Educational use only. Do not use on software you don't own.</p>
+        </div>
+    </footer>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            // Interactive AI Chat logic
+            const aiChatForm = document.getElementById('aiChatForm');
+            const aiUserPrompt = document.getElementById('aiUserPrompt');
+            const aiChatHistory = document.getElementById('aiChatHistory');
+            let aiChatMessages = [];
+            let lastJobId = null;
+            let currentDisassembly = "";
+            let currentFunction = null;
+            
+            function getCurrentJobId() {
+                try {
+                    return currentJobId || lastJobId;
+                } catch { return lastJobId; }
+            }
+            
+            function renderChat() {
+                if (!aiChatHistory) return;
+                aiChatHistory.innerHTML = aiChatMessages.map(msg => `
+                    <div class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}">
+                        <div class="max-w-[80%] px-4 py-2 rounded-xl shadow-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-white text-gray-900 rounded-bl-none border border-indigo-100'}">
+                            <span class="block text-xs font-semibold mb-1 opacity-70">${msg.role === 'user' ? 'You' : 'AI'}</span>
+                            <span class="whitespace-pre-line">${msg.content}</span>
+                        </div>
+                    </div>
+                `).join('');
+                aiChatHistory.scrollTop = aiChatHistory.scrollHeight;
+            }
+            
+            if (aiChatForm && aiUserPrompt && aiChatHistory) {
+                aiChatForm.addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const prompt = aiUserPrompt.value.trim();
+                    if (!prompt) return;
+                    
+                    aiChatMessages.push({ role: 'user', content: prompt });
+                    renderChat();
+                    aiUserPrompt.value = '';
+                    
+                    const jobId = getCurrentJobId();
+                    aiChatMessages.push({ role: 'ai', content: 'Thinking...' });
+                    renderChat();
+                    
                     try {
-                        return currentJobId || lastJobId;
-                    } catch { return lastJobId; }
-                }
-                
-                function renderChat() {
-                    if (!aiChatHistory) return;
-                    aiChatHistory.innerHTML = aiChatMessages.map(msg => `
-                        <div class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}">
-                            <div class="max-w-[80%] px-4 py-2 rounded-xl shadow-sm ${msg.role === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-white text-gray-900 rounded-bl-none border border-indigo-100'}">
-                                <span class="block text-xs font-semibold mb-1 opacity-70">${msg.role === 'user' ? 'You' : 'AI'}</span>
-                                <span class="whitespace-pre-line">${msg.content}</span>
-                            </div>
-                        </div>
-                    `).join('');
-                    aiChatHistory.scrollTop = aiChatHistory.scrollHeight;
-                }
-                
-                if (aiChatForm && aiUserPrompt && aiChatHistory) {
-                    aiChatForm.addEventListener('submit', async (e) => {
-                        e.preventDefault();
-                        const prompt = aiUserPrompt.value.trim();
-                        if (!prompt) return;
+                        // Get current API credentials from input fields
+                        const currentApiKey = document.getElementById('apiKeyInput')?.value || null;
+                        const currentApiUrl = document.getElementById('apiUrlInput')?.value || null;
                         
-                        aiChatMessages.push({ role: 'user', content: prompt });
-                        renderChat();
-                        aiUserPrompt.value = '';
+                        const headers = {
+                            'Content-Type': 'application/json'
+                        };
                         
-                        const jobId = getCurrentJobId();
-                        aiChatMessages.push({ role: 'ai', content: 'Thinking...' });
-                        renderChat();
-                        
-                        try {
-                            // Get current API credentials from input fields
-                            const currentApiKey = document.getElementById('apiKeyInput')?.value || null;
-                            const currentApiUrl = document.getElementById('apiUrlInput')?.value || null;
-                            
-                            const headers = {
-                                'Content-Type': 'application/json'
-                            };
-                            
-                            // Add API credentials if provided
-                            if (currentApiKey) {
-                                headers['X-Dartmouth-API-Key'] = currentApiKey;
-                            }
-                            if (currentApiUrl) {
-                                headers['X-Dartmouth-API-Url'] = currentApiUrl;
-                            }
-                            
-                            const res = await fetch('/api/ai/chat', {
-                                method: 'POST',
-                                headers: headers,
-                                body: JSON.stringify({ 
-                                    question: prompt, 
-                                    job_id: jobId 
-                                })
-                            });
-                            
-                            if (!res.ok) {
-                                throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-                            }
-                            
-                            const data = await res.json();
-                            aiChatMessages.pop(); // Remove 'Thinking...'
-                            aiChatMessages.push({ 
-                                role: 'ai', 
-                                content: data.answer || data.detail || 'No answer.' 
-                            });
-                            renderChat();
-                        } catch (e) {
-                            aiChatMessages.pop();
-                            aiChatMessages.push({ 
-                                role: 'ai', 
-                                content: `Error: ${e.message}. Make sure API credentials are set above and you clicked "Test Dartmouth API".` 
-                            });
-                            renderChat();
+                        // Add API credentials if provided
+                        if (currentApiKey) {
+                            headers['X-Dartmouth-API-Key'] = currentApiKey;
                         }
+                        if (currentApiUrl) {
+                            headers['X-Dartmouth-API-Url'] = currentApiUrl;
+                        }
+                        
+                        const res = await fetch('/api/ai/chat', {
+                            method: 'POST',
+                            headers: headers,
+                            body: JSON.stringify({ 
+                                question: prompt, 
+                                job_id: jobId 
+                            })
+                        });
+                        
+                        if (!res.ok) {
+                            throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+                        }
+                        
+                        const data = await res.json();
+                        aiChatMessages.pop(); // Remove 'Thinking...'
+                        aiChatMessages.push({ 
+                            role: 'ai', 
+                            content: data.answer || data.detail || 'No answer.' 
+                        });
+                        renderChat();
+                    } catch (e) {
+                        aiChatMessages.pop();
+                        aiChatMessages.push({ 
+                            role: 'ai', 
+                            content: `Error: ${e.message}. Make sure API credentials are set above and you clicked "Test Dartmouth API".` 
+                        });
+                        renderChat();
+                    }
+                });
+            }
+            
+            // ==================== DISASSEMBLER FUNCTIONALITY ====================
+            
+            // Show disassembler when file is uploaded
+            function showDisassembler() {
+                const disassemblerSection = document.getElementById('disassemblerSection');
+                if (disassemblerSection) {
+                    disassemblerSection.classList.remove('hidden');
+                    loadFunctions();
+                }
+            }
+            
+            // Load functions from binary
+            async function loadFunctions() {
+                const functionList = document.getElementById('functionList');
+                if (!functionList || !currentJobId) return;
+                
+                functionList.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <i class="fas fa-spinner fa-spin mb-2"></i>
+                        <p>Loading functions...</p>
+                    </div>
+                `;
+                
+                const formData = new FormData();
+                formData.append('job_id', currentJobId);
+                
+                try {
+                    const currentApiKey = document.getElementById('apiKeyInput')?.value || null;
+                    
+                    const response = await fetch('/api/disassembler/functions', {
+                        method: 'POST',
+                        headers: {
+                            ...(currentApiKey ? { 'X-Dartmouth-API-Key': currentApiKey } : {}),
+                        },
+                        body: formData
                     });
+                    
+                    const data = await response.json();
+                    
+                    if (data.functions && data.functions.length > 0) {
+                        functionList.innerHTML = data.functions.map(func => `
+                            <div class="function-item p-2 mb-1 border-b hover:bg-blue-50 cursor-pointer rounded" 
+                                 data-address="${func.address}" data-name="${func.name}">
+                                <div class="font-mono text-xs text-blue-600">0x${func.address}</div>
+                                <div class="font-semibold truncate">${func.name}</div>
+                            </div>
+                        `).join('');
+                        
+                        // Add click handlers
+                        document.querySelectorAll('.function-item').forEach(item => {
+                            item.addEventListener('click', function() {
+                                document.querySelectorAll('.function-item').forEach(i => 
+                                    i.classList.remove('selected', 'bg-blue-100', 'border-blue-300'));
+                                this.classList.add('selected', 'bg-blue-100', 'border-blue-300');
+                                currentFunction = {
+                                    address: this.dataset.address,
+                                    name: this.dataset.name
+                                };
+                                disassembleFunction(this.dataset.name, this.dataset.address);
+                            });
+                        });
+                        
+                        // Try to find and select main function
+                        const mainFunc = data.functions.find(f => 
+                            f.name === 'main' || f.name.includes('main') || f.name === '_start');
+                        if (mainFunc) {
+                            setTimeout(() => {
+                                const mainItem = document.querySelector(`[data-name="${mainFunc.name}"]`);
+                                if (mainItem) mainItem.click();
+                            }, 100);
+                        }
+                    } else {
+                        functionList.innerHTML = `
+                            <div class="text-center py-8 text-gray-500">
+                                <i class="fas fa-exclamation-triangle mb-2"></i>
+                                <p>No functions found</p>
+                                <p class="text-xs mt-2">Try analyzing main() manually</p>
+                            </div>
+                        `;
+                    }
+                } catch (error) {
+                    functionList.innerHTML = `
+                        <div class="text-center py-8 text-gray-500">
+                            <i class="fas fa-exclamation-circle mb-2"></i>
+                            <p>Error loading functions</p>
+                            <p class="text-xs mt-2">${error.message}</p>
+                        </div>
+                    `;
+                }
+            }
+            
+            // Disassemble a function
+            async function disassembleFunction(funcName = null, address = null) {
+                const disassemblyView = document.getElementById('disassemblyView');
+                const disasmStatus = document.getElementById('disasmStatus');
+                
+                if (!disassemblyView || !currentJobId) return;
+                
+                disassemblyView.innerHTML = `
+                    <div class="text-center py-16 text-gray-500">
+                        <i class="fas fa-spinner fa-spin text-2xl mb-4"></i>
+                        <p>Disassembling ${funcName || 'function'}...</p>
+                    </div>
+                `;
+                
+                if (disasmStatus) {
+                    disasmStatus.textContent = 'Disassembling...';
+                    disasmStatus.className = 'px-2 py-1 bg-yellow-100 text-yellow-800 rounded';
                 }
                 
-                const API_BASE = window.location.origin;
-                const DEFAULT_DARTMOUTH_URL = 'https://chat.dartmouth.edu/api';
-                let currentFile = null;
-                let currentMode = 'auto';
-                let currentJobId = null;
-                let currentApiKey = null;
-                let currentApiUrl = DEFAULT_DARTMOUTH_URL;
+                const formData = new FormData();
+                formData.append('job_id', currentJobId);
+                if (funcName) formData.append('function_name', funcName);
+                if (address) formData.append('address', address);
+                
+                try {
+                    const response = await fetch('/api/disassembler/disassemble', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    currentDisassembly = data.disassembly || "No disassembly generated.";
+                    
+                    // Format and display disassembly
+                    const formatted = formatDisassembly(currentDisassembly);
+                    disassemblyView.innerHTML = `<pre class="text-xs">${formatted}</pre>`;
+                    
+                    // Show AI analysis panel
+                    const aiPanel = document.getElementById('aiAnalysisPanel');
+                    if (aiPanel) aiPanel.classList.remove('hidden');
+                    
+                    if (disasmStatus) {
+                        disasmStatus.textContent = 'Ready';
+                        disasmStatus.className = 'px-2 py-1 bg-green-100 text-green-800 rounded';
+                    }
+                    
+                    // Auto-analyze with AI if credentials are available
+                    const currentApiKey = document.getElementById('apiKeyInput')?.value || null;
+                    const currentApiUrl = document.getElementById('apiUrlInput')?.value || null;
+                    if (currentApiKey && currentApiUrl) {
+                        autoAnalyzeWithAI();
+                    }
+                    
+                } catch (error) {
+                    disassemblyView.innerHTML = `
+                        <div class="text-center py-16 text-gray-500">
+                            <i class="fas fa-exclamation-circle text-2xl mb-4"></i>
+                            <p>Error disassembling</p>
+                            <p class="text-xs mt-2">${error.message}</p>
+                        </div>
+                    `;
+                    
+                    if (disasmStatus) {
+                        disasmStatus.textContent = 'Error';
+                        disasmStatus.className = 'px-2 py-1 bg-red-100 text-red-800 rounded';
+                    }
+                }
+            }
+            
+            // Format disassembly for display
+            function formatDisassembly(asm) {
+                if (!asm) return "No disassembly";
+                
+                // Simple syntax highlighting
+                return asm
+                    .replace(/(0x[0-9a-f]+)/gi, '<span class="text-green-400">$1</span>')
+                    .replace(/(call|jmp|je|jne|jg|jl|jge|jle|ja|jb)\\s+/gi, '<span class="text-yellow-300 font-bold">$1</span> ')
+                    .replace(/(mov|add|sub|xor|and|or|shl|shr|push|pop|ret|nop)\\s+/gi, '<span class="text-blue-300">$1</span> ')
+                    .replace(/(eax|ebx|ecx|edx|esi|edi|ebp|esp|rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp)/gi, '<span class="text-purple-300">$1</span>')
+                    .replace(/(\\[.*?\\])/g, '<span class="text-orange-300">$1</span>')
+                    .replace(/\\n/g, '<br>')
+                    .replace(/ /g, '&nbsp;');
+            }
+            
+            // Analyze with AI
+            async function analyzeWithAI(question = null) {
+                const aiOutput = document.getElementById('aiAnalysisOutput');
+                if (!aiOutput || !currentDisassembly) return;
+                
+                aiOutput.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <i class="fas fa-spinner fa-spin mb-2"></i>
+                        <p>AI is analyzing...</p>
+                    </div>
+                `;
+                
+                const formData = new FormData();
+                formData.append('job_id', currentJobId);
+                formData.append('disassembly', currentDisassembly.substring(0, 4000)); // Limit size
+                if (question) formData.append('question', question);
+                
+                try {
+                    const currentApiKey = document.getElementById('apiKeyInput')?.value || null;
+                    const currentApiUrl = document.getElementById('apiUrlInput')?.value || null;
+                    
+                    const response = await fetch('/api/disassembler/analyze', {
+                        method: 'POST',
+                        headers: {
+                            ...(currentApiKey ? { 'X-Dartmouth-API-Key': currentApiKey } : {}),
+                            ...(currentApiUrl ? { 'X-Dartmouth-API-Url': currentApiUrl } : {}),
+                        },
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    aiOutput.innerHTML = `
+                        <div class="prose prose-sm max-w-none">
+                            <div class="text-gray-700 whitespace-pre-wrap">${escapeHtml(data.analysis || "No analysis returned.")}</div>
+                        </div>
+                    `;
+                } catch (error) {
+                    aiOutput.innerHTML = `
+                        <div class="text-center py-8 text-red-500">
+                            <i class="fas fa-exclamation-circle mb-2"></i>
+                            <p>AI analysis failed</p>
+                            <p class="text-xs">${error.message}</p>
+                            <p class="text-xs mt-2">Make sure API credentials are set</p>
+                        </div>
+                    `;
+                }
+            }
+            
+            // Auto-analyze on load
+            async function autoAnalyzeWithAI() {
+                const aiOutput = document.getElementById('aiAnalysisOutput');
+                if (!aiOutput) return;
+                
+                aiOutput.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <i class="fas fa-robot mb-2"></i>
+                        <p>AI Assistant Ready</p>
+                        <p class="text-xs mt-2">Ask a question or click "Explain This Code"</p>
+                    </div>
+                `;
+            }
+            
+            // Find vulnerabilities
+            async function findVulnerabilities() {
+                if (!currentDisassembly) {
+                    alert("Please disassemble a function first");
+                    return;
+                }
+                
+                const aiOutput = document.getElementById('aiAnalysisOutput');
+                if (!aiOutput) return;
+                
+                aiOutput.innerHTML = `
+                    <div class="text-center py-8 text-gray-500">
+                        <i class="fas fa-spinner fa-spin mb-2"></i>
+                        <p>Searching for vulnerabilities...</p>
+                    </div>
+                `;
+                
+                const formData = new FormData();
+                formData.append('job_id', currentJobId);
+                formData.append('disassembly', currentDisassembly.substring(0, 3000));
+                
+                try {
+                    const currentApiKey = document.getElementById('apiKeyInput')?.value || null;
+                    const currentApiUrl = document.getElementById('apiUrlInput')?.value || null;
+                    
+                    const response = await fetch('/api/disassembler/find_vulns', {
+                        method: 'POST',
+                        headers: {
+                            ...(currentApiKey ? { 'X-Dartmouth-API-Key': currentApiKey } : {}),
+                            ...(currentApiUrl ? { 'X-Dartmouth-API-Url': currentApiUrl } : {}),
+                        },
+                        body: formData
+                    });
+                    
+                    const data = await response.json();
+                    aiOutput.innerHTML = `
+                        <div class="prose prose-sm max-w-none">
+                            <h4 class="font-bold text-red-600 mb-2">Vulnerability Analysis</h4>
+                            <div class="text-gray-700 whitespace-pre-wrap">${escapeHtml(data.vulnerabilities || "No vulnerabilities found.")}</div>
+                        </div>
+                    `;
+                } catch (error) {
+                    aiOutput.innerHTML = `
+                        <div class="text-center py-8 text-red-500">
+                            <i class="fas fa-exclamation-circle mb-2"></i>
+                            <p>Vulnerability scan failed</p>
+                            <p class="text-xs">${error.message}</p>
+                        </div>
+                    `;
+                }
+            }
+            
+            const API_BASE = window.location.origin;
+            const DEFAULT_DARTMOUTH_URL = 'https://chat.dartmouth.edu/api';
+            let currentFile = null;
+            let currentMode = 'auto';
+            let currentJobId = null;
+            let currentApiKey = null;
+            let currentApiUrl = DEFAULT_DARTMOUTH_URL;
 
-                // DOM elements
-                const uploadArea = document.getElementById('uploadArea');
-                const fileInput = document.getElementById('fileInput');
-                const analyzeBtn = document.getElementById('analyzeBtn');
-                const modeButtons = document.querySelectorAll('.mode-btn');
-                const statusBox = document.getElementById('statusBox');
-                const resultsBox = document.getElementById('resultsBox');
-                const emptyState = document.getElementById('emptyState');
-                const solutionSection = document.getElementById('solutionSection');
-                const solutionCommand = document.getElementById('solutionCommand');
-                const copyBtn = document.getElementById('copyBtn');
-                const analysisDetails = document.getElementById('analysisDetails');
-                const statusText = document.getElementById('statusText');
-                const progressBar = document.getElementById('progressBar').querySelector('div');
-                const fileStatus = document.getElementById('fileStatus');
-                const apiKeyInput = document.getElementById('apiKeyInput');
-                const apiUrlInput = document.getElementById('apiUrlInput');
-                const aiHealthBtn = document.getElementById('aiHealthBtn');
-                const aiHealthStatus = document.getElementById('aiHealthStatus');
+            // DOM elements
+            const uploadArea = document.getElementById('uploadArea');
+            const fileInput = document.getElementById('fileInput');
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            const modeButtons = document.querySelectorAll('.mode-btn');
+            const statusBox = document.getElementById('statusBox');
+            const resultsBox = document.getElementById('resultsBox');
+            const emptyState = document.getElementById('emptyState');
+            const solutionSection = document.getElementById('solutionSection');
+            const solutionCommand = document.getElementById('solutionCommand');
+            const copyBtn = document.getElementById('copyBtn');
+            const analysisDetails = document.getElementById('analysisDetails');
+            const statusText = document.getElementById('statusText');
+            const progressBar = document.getElementById('progressBar');
+            const fileStatus = document.getElementById('fileStatus');
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            const apiUrlInput = document.getElementById('apiUrlInput');
+            const aiHealthBtn = document.getElementById('aiHealthBtn');
+            const aiHealthStatus = document.getElementById('aiHealthStatus');
 
-                // Event Listeners
+            // Event Listeners
+            if (uploadArea) {
                 uploadArea.addEventListener('click', () => {
                     if (fileInput) {
                         fileInput.click();
@@ -1100,7 +1730,9 @@ async def serve_ui():
                         handleFileSelect(e.dataTransfer.files[0]);
                     }
                 });
-                
+            }
+            
+            if (fileInput) {
                 fileInput.addEventListener('change', () => {
                     const selectedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
                     if (selectedFile) {
@@ -1109,7 +1741,9 @@ async def serve_ui():
                         fileInput.value = '';
                     }
                 });
-                
+            }
+            
+            if (modeButtons.length > 0) {
                 modeButtons.forEach(btn => {
                     btn.addEventListener('click', () => {
                         modeButtons.forEach(b => b.classList.remove('ring-4', 'ring-opacity-50', 'ring-blue-500'));
@@ -1119,74 +1753,167 @@ async def serve_ui():
                     });
                 });
                 
-                analyzeBtn.addEventListener('click', startAnalysis);
-                copyBtn.addEventListener('click', copySolution);
-                
-                if (apiKeyInput) {
-                    apiKeyInput.addEventListener('input', (e) => {
-                        currentApiKey = e.target.value || null;
-                    });
-                }
-                
-                if (apiUrlInput) {
-                    apiUrlInput.value = DEFAULT_DARTMOUTH_URL;
-                    apiUrlInput.addEventListener('input', (e) => {
-                        currentApiUrl = e.target.value || DEFAULT_DARTMOUTH_URL;
-                    });
-                }
-                
-                if (aiHealthBtn) {
-                    aiHealthBtn.addEventListener('click', runHealthCheck);
-                }
-
                 // Set default mode
-                if (modeButtons.length > 0) {
-                    modeButtons[0].classList.add('ring-4', 'ring-opacity-50', 'ring-blue-500');
+                modeButtons[0].classList.add('ring-4', 'ring-opacity-50', 'ring-blue-500');
+            }
+            
+            if (analyzeBtn) {
+                analyzeBtn.addEventListener('click', function() {
+                    startAnalysis();
+                    // Show disassembler after analysis starts
+                    setTimeout(showDisassembler, 500);
+                });
+            }
+            
+            if (copyBtn) {
+                copyBtn.addEventListener('click', copySolution);
+            }
+            
+            if (apiKeyInput) {
+                apiKeyInput.addEventListener('input', (e) => {
+                    currentApiKey = e.target.value || null;
+                });
+            }
+            
+            if (apiUrlInput) {
+                apiUrlInput.value = DEFAULT_DARTMOUTH_URL;
+                apiUrlInput.addEventListener('input', (e) => {
+                    currentApiUrl = e.target.value || DEFAULT_DARTMOUTH_URL;
+                });
+            }
+            
+            if (aiHealthBtn) {
+                aiHealthBtn.addEventListener('click', runHealthCheck);
+            }
+
+            // Disassembler button event listeners
+            const analyzeMainBtn = document.getElementById('analyzeMainBtn');
+            if (analyzeMainBtn) {
+                analyzeMainBtn.addEventListener('click', () => {
+                    disassembleFunction('main');
+                });
+            }
+            
+            const findVulnsBtn = document.getElementById('findVulnsBtn');
+            if (findVulnsBtn) {
+                findVulnsBtn.addEventListener('click', findVulnerabilities);
+            }
+            
+            const explainCodeBtn = document.getElementById('explainCodeBtn');
+            if (explainCodeBtn) {
+                explainCodeBtn.addEventListener('click', () => {
+                    analyzeWithAI("Please explain this code in detail for a student learning reverse engineering.");
+                });
+            }
+            
+            const askAIBtn = document.getElementById('askAIBtn');
+            const aiQuestionInput = document.getElementById('aiQuestionInput');
+            if (askAIBtn && aiQuestionInput) {
+                askAIBtn.addEventListener('click', () => {
+                    const question = aiQuestionInput.value.trim();
+                    if (question) {
+                        analyzeWithAI(question);
+                        aiQuestionInput.value = '';
+                    }
+                });
+                
+                aiQuestionInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        const question = aiQuestionInput.value.trim();
+                        if (question) {
+                            analyzeWithAI(question);
+                            aiQuestionInput.value = '';
+                        }
+                    }
+                });
+            }
+            
+            const copyDisasmBtn = document.getElementById('copyDisasmBtn');
+            if (copyDisasmBtn) {
+                copyDisasmBtn.addEventListener('click', () => {
+                    if (currentDisassembly) {
+                        navigator.clipboard.writeText(currentDisassembly)
+                            .then(() => {
+                                const original = copyDisasmBtn.innerHTML;
+                                copyDisasmBtn.innerHTML = '<i class="fas fa-check mr-1"></i> Copied!';
+                                setTimeout(() => {
+                                    copyDisasmBtn.innerHTML = original;
+                                }, 2000);
+                            });
+                    }
+                });
+            }
+            
+            const refreshDisasmBtn = document.getElementById('refreshDisasmBtn');
+            if (refreshDisasmBtn) {
+                refreshDisasmBtn.addEventListener('click', () => {
+                    if (currentFunction) {
+                        disassembleFunction(currentFunction.name, currentFunction.address);
+                    }
+                });
+            }
+            
+            const functionSearch = document.getElementById('functionSearch');
+            if (functionSearch) {
+                functionSearch.addEventListener('input', (e) => {
+                    const searchTerm = e.target.value.toLowerCase();
+                    document.querySelectorAll('.function-item').forEach(item => {
+                        const funcName = item.dataset.name.toLowerCase();
+                        item.style.display = funcName.includes(searchTerm) ? '' : 'none';
+                    });
+                });
+            }
+            
+            function handleFileSelect(file) {
+                currentFile = file;
+                if (analyzeBtn) analyzeBtn.disabled = false;
+                if (fileStatus) {
+                    fileStatus.textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
                 }
                 
-                function handleFileSelect(file) {
-                    currentFile = file;
-                    analyzeBtn.disabled = false;
-                    if (fileStatus) {
-                        fileStatus.textContent = `Selected: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
-                    }
-                    
+                if (uploadArea) {
                     uploadArea.innerHTML = `
                         <div class="text-4xl mb-3"><i class="fas fa-check-circle text-green-500"></i></div>
                         <p class="text-xl font-semibold text-gray-700">${file.name}</p>
                         <p class="text-gray-500 mt-2">${(file.size / 1024).toFixed(1)} KB</p>
                         <p class="text-sm text-gray-400 mt-4">Ready to analyze in ${currentMode} mode</p>
                     `;
-                    
-                    emptyState.classList.add('hidden');
-                    resultsBox.classList.add('hidden');
                 }
                 
-                async function runHealthCheck() {
-                    if (!apiKeyInput || !apiUrlInput) return;
-                    
-                    const currentApiKey = apiKeyInput.value || null;
-                    const currentApiUrl = apiUrlInput.value || null;
-                    
-                    if (!currentApiKey || !currentApiUrl) {
+                if (emptyState) emptyState.classList.add('hidden');
+                if (resultsBox) resultsBox.classList.add('hidden');
+            }
+            
+            async function runHealthCheck() {
+                if (!apiKeyInput || !apiUrlInput) return;
+                
+                const currentApiKey = apiKeyInput.value || null;
+                const currentApiUrl = apiUrlInput.value || null;
+                
+                if (!currentApiKey || !currentApiUrl) {
+                    if (aiHealthStatus) {
                         aiHealthStatus.textContent = 'Error: enter both URL and key';
                         aiHealthStatus.className = 'text-xs text-red-500';
-                        return;
                     }
-                    
+                    return;
+                }
+                
+                if (aiHealthStatus) {
                     aiHealthStatus.textContent = 'Checking...';
                     aiHealthStatus.className = 'text-xs text-yellow-500';
+                }
+                
+                const formData = new FormData();
+                formData.append('dartmouth_api_key_form', currentApiKey);
+                formData.append('dartmouth_api_url_form', currentApiUrl);
+                
+                try {
+                    const res = await fetch(API_BASE + '/api/ai/health', { 
+                        method: 'POST', 
+                        body: formData 
+                    });
                     
-                    const formData = new FormData();
-                    formData.append('dartmouth_api_key_form', currentApiKey);
-                    formData.append('dartmouth_api_url_form', currentApiUrl);
-                    
-                    try {
-                        const res = await fetch(`${API_BASE}/api/ai/health`, { 
-                            method: 'POST', 
-                            body: formData 
-                        });
-                        
+                    if (aiHealthStatus) {
                         if (res.ok) {
                             aiHealthStatus.textContent = 'OK';
                             aiHealthStatus.className = 'text-xs text-green-500';
@@ -1195,246 +1922,257 @@ async def serve_ui():
                             aiHealthStatus.textContent = `Error: ${text.substring(0, 50)}`;
                             aiHealthStatus.className = 'text-xs text-red-500';
                         }
-                    } catch (error) {
+                    }
+                } catch (error) {
+                    if (aiHealthStatus) {
                         aiHealthStatus.textContent = `Error: ${error?.message || 'Connection failed'}`;
                         aiHealthStatus.className = 'text-xs text-red-500';
                     }
                 }
+            }
 
-                async function startAnalysis() {
-                    if (!currentFile) return;
+            async function startAnalysis() {
+                if (!currentFile) return;
+                
+                if (statusBox) statusBox.classList.remove('hidden');
+                if (resultsBox) resultsBox.classList.add('hidden');
+                if (solutionSection) solutionSection.classList.add('hidden');
+                if (analyzeBtn) analyzeBtn.disabled = true;
+                
+                const formData = new FormData();
+                formData.append('file', currentFile);
+                
+                // Get current API credentials
+                const currentApiKey = apiKeyInput?.value || null;
+                const currentApiUrl = apiUrlInput?.value || null;
+                
+                if (currentApiKey) formData.append('dartmouth_api_key_form', currentApiKey);
+                if (currentApiUrl) formData.append('dartmouth_api_url_form', currentApiUrl);
+                
+                try {
+                    if (statusText) statusText.textContent = 'Uploading file...';
+                    if (progressBar && progressBar.querySelector('div')) {
+                        progressBar.querySelector('div').style.width = '25%';
+                    }
                     
-                    statusBox.classList.remove('hidden');
-                    resultsBox.classList.add('hidden');
-                    solutionSection.classList.add('hidden');
-                    analyzeBtn.disabled = true;
+                    const response = await fetch(API_BASE + '/api/analyze?mode=' + currentMode, {
+                        method: 'POST',
+                        headers: {
+                            ...(currentApiKey ? { 'X-Dartmouth-API-Key': currentApiKey } : {}),
+                            ...(currentApiUrl ? { 'X-Dartmouth-API-Url': currentApiUrl } : {}),
+                        },
+                        body: formData
+                    });
                     
-                    const formData = new FormData();
-                    formData.append('file', currentFile);
+                    if (!response.ok) throw new Error('Upload failed');
                     
-                    // Get current API credentials
-                    const currentApiKey = apiKeyInput?.value || null;
-                    const currentApiUrl = apiUrlInput?.value || null;
+                    const data = await response.json();
+                    currentJobId = data.job_id;
+                    lastJobId = currentJobId;
                     
-                    if (currentApiKey) formData.append('dartmouth_api_key_form', currentApiKey);
-                    if (currentApiUrl) formData.append('dartmouth_api_url_form', currentApiUrl);
+                    await pollResults();
+                    
+                } catch (error) {
+                    showError(error.message);
+                }
+            }
+            
+            async function pollResults() {
+                let attempts = 0;
+                const maxAttempts = 30;
+                
+                while (attempts < maxAttempts) {
+                    if (statusText) statusText.textContent = `Analyzing in ${currentMode} mode... (${attempts + 1}s)`;
+                    if (progressBar && progressBar.querySelector('div')) {
+                        progressBar.querySelector('div').style.width = `${25 + (attempts * 2.5)}%`;
+                    }
                     
                     try {
-                        statusText.textContent = 'Uploading file...';
-                        progressBar.style.width = '25%';
-                        
-                        const response = await fetch(`${API_BASE}/api/analyze?mode=${currentMode}`, {
-                            method: 'POST',
-                            headers: {
-                                ...(currentApiKey ? { 'X-Dartmouth-API-Key': currentApiKey } : {}),
-                                ...(currentApiUrl ? { 'X-Dartmouth-API-Url': currentApiUrl } : {}),
-                            },
-                            body: formData
-                        });
-                        
-                        if (!response.ok) throw new Error('Upload failed');
-                        
+                        const response = await fetch(API_BASE + '/api/result/' + currentJobId);
                         const data = await response.json();
-                        currentJobId = data.job_id;
-                        lastJobId = currentJobId;
                         
-                        await pollResults();
+                        if (data.status === 'completed') {
+                            if (statusText) statusText.textContent = 'Analysis complete!';
+                            if (progressBar && progressBar.querySelector('div')) {
+                                progressBar.querySelector('div').style.width = '100%';
+                            }
+                            showResults(data.result);
+                            return;
+                        } else if (data.status === 'error') {
+                            throw new Error(data.error || 'Analysis failed');
+                        }
+                        
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        attempts++;
                         
                     } catch (error) {
-                        showError(error.message);
+                        throw error;
                     }
                 }
                 
-                async function pollResults() {
-                    let attempts = 0;
-                    const maxAttempts = 30;
-                    
-                    while (attempts < maxAttempts) {
-                        statusText.textContent = `Analyzing in ${currentMode} mode... (${attempts + 1}s)`;
-                        progressBar.style.width = `${25 + (attempts * 2.5)}%`;
-                        
-                        try {
-                            const response = await fetch(`${API_BASE}/api/result/${currentJobId}`);
-                            const data = await response.json();
-                            
-                            if (data.status === 'completed') {
-                                statusText.textContent = 'Analysis complete!';
-                                progressBar.style.width = '100%';
-                                showResults(data.result);
-                                return;
-                            } else if (data.status === 'error') {
-                                throw new Error(data.error || 'Analysis failed');
-                            }
-                            
-                            await new Promise(resolve => setTimeout(resolve, 1000));
-                            attempts++;
-                            
-                        } catch (error) {
-                            throw error;
-                        }
+                throw new Error('Analysis timeout');
+            }
+            
+            function showResults(result) {
+                setTimeout(() => {
+                    if (statusBox) statusBox.classList.add('hidden');
+                    if (progressBar && progressBar.querySelector('div')) {
+                        progressBar.querySelector('div').style.width = '0%';
                     }
-                    
-                    throw new Error('Analysis timeout');
-                }
+                }, 2000);
                 
-                function showResults(result) {
-                    setTimeout(() => {
-                        statusBox.classList.add('hidden');
-                        progressBar.style.width = '0%';
-                    }, 2000);
-                    
-                    resultsBox.classList.remove('hidden');
-                    emptyState.classList.add('hidden');
-                    analyzeBtn.disabled = false;
-                    
-                    analysisDetails.innerHTML = '';
-                    
-                    // Show mode-specific message
-                    if (result.message) {
-                        analysisDetails.innerHTML += `
-                            <div class="result-box bg-blue-50 rounded-xl p-5">
-                                <div class="flex items-center gap-3 mb-2">
-                                    <i class="fas fa-info-circle text-blue-600"></i>
-                                    <h4 class="font-bold text-lg text-gray-800">${result.type === 'ai' ? 'AI Analysis' : result.type === 'tutor' ? 'Tutor Mode' : 'Auto Analysis'}</h4>
-                                </div>
-                                <p class="text-gray-700">${result.message}</p>
-                            </div>
-                        `;
-                    }
-                    
-                    if (result.solution && result.solution.arg1) {
-                        solutionSection.classList.remove('hidden');
-                        const cmd = `./${currentFile.name} '${result.solution.arg1}' '${result.solution.arg2 || ''}'`.trim();
-                        solutionCommand.textContent = cmd;
-                    }
-                    
-                    if (result.analysis) {
-                        analysisDetails.innerHTML += `
-                            <div class="result-box bg-gray-50 rounded-xl p-5">
-                                <h4 class="font-bold text-lg mb-3"><i class="fas fa-info-circle mr-2"></i>Analysis Summary</h4>
-                                <div class="space-y-2">
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Technique:</span>
-                                        <span class="font-semibold">${result.analysis.technique || 'Unknown'}</span>
-                                    </div>
-                                    <div class="flex justify-between">
-                                        <span class="text-gray-600">Confidence:</span>
-                                        <span class="font-semibold">${result.analysis.confidence || 0}</span>
-                                    </div>
-                                    ${result.analysis.message ? `
-                                    <div class="mt-2 p-3 bg-yellow-50 rounded-lg">
-                                        <span class="text-yellow-700">${result.analysis.message}</span>
-                                    </div>` : ''}
-                                </div>
-                            </div>
-                        `;
-                    }
-                    
-                    if (result.file_info) {
-                        analysisDetails.innerHTML += `
-                            <div class="result-box bg-blue-50 rounded-xl p-5">
-                                <h4 class="font-bold text-lg mb-3"><i class="fas fa-file mr-2"></i>File Information</h4>
-                                <div class="grid grid-cols-2 gap-4">
-                                    <div class="p-3 bg-white rounded-lg">
-                                        <div class="text-sm text-gray-600">Filename</div>
-                                        <div class="font-medium">${result.file_info.filename}</div>
-                                    </div>
-                                    <div class="p-3 bg-white rounded-lg">
-                                        <div class="text-sm text-gray-600">Size</div>
-                                        <div class="font-medium">${(result.file_info.size / 1024).toFixed(1)} KB</div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                    }
-                    
-                    if (currentMode === 'tutor' && result.hints) {
-                        analysisDetails.innerHTML += `
-                            <div class="result-box bg-purple-50 rounded-xl p-5">
-                                <h4 class="font-bold text-lg mb-3"><i class="fas fa-lightbulb mr-2"></i>Educational Hints</h4>
-                                <div class="space-y-3">
-                                    ${result.hints.map((hint, i) => `
-                                        <div class="flex items-start gap-3 p-4 bg-white rounded-xl">
-                                            <div class="p-2 bg-purple-100 rounded-lg">
-                                                <span class="font-bold text-purple-700">${i + 1}</span>
-                                            </div>
-                                            <p class="text-gray-700">${hint}</p>
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            </div>
-                        `;
-                    }
-                    
-                    if (currentMode === 'ai' && result.insights) {
-                        analysisDetails.innerHTML += `
-                            <div class="result-box bg-indigo-50 rounded-xl p-5">
-                                <h4 class="font-bold text-lg mb-3"><i class="fas fa-robot mr-2"></i>AI Insights</h4>
-                                <div class="space-y-3">
-                                    ${formatInsights(result.insights)}
-                                </div>
-                            </div>
-                        `;
-                    }
-                    
-                    if (result.transforms && result.transforms.length > 0) {
-                        analysisDetails.innerHTML += `
-                            <div class="result-box bg-green-50 rounded-xl p-5">
-                                <h4 class="font-bold text-lg mb-3"><i class="fas fa-cog mr-2"></i>Detected Transformations</h4>
-                                <div class="space-y-2">
-                                    ${result.transforms.map(t => `
-                                        <div class="flex items-center gap-3 p-3 bg-white rounded-lg">
-                                            <span class="px-2 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded">
-                                                ${t.type.toUpperCase()}
-                                            </span>
-                                            <span class="flex-1 text-gray-700">${t.description || ''}</span>
-                                            ${t.value ? `<span class="text-gray-500">${t.value}</span>` : ''}
-                                        </div>
-                                    `).join('')}
-                                </div>
-                            </div>
-                        `;
-                    }
-                }
+                if (resultsBox) resultsBox.classList.remove('hidden');
+                if (emptyState) emptyState.classList.add('hidden');
+                if (analyzeBtn) analyzeBtn.disabled = false;
                 
-                function escapeHtml(text) {
-                    return String(text)
-                        .replace(/&/g, '&amp;')
-                        .replace(/</g, '&lt;')
-                        .replace(/>/g, '&gt;')
-                        .replace(/"/g, '&quot;')
-                        .replace(/'/g, '&#39;');
-                }
-
-                function formatInsights(insights) {
-                    const raw = typeof insights === 'string'
-                        ? insights
-                        : typeof insights?.insights === 'string'
-                            ? insights.insights
-                            : Array.isArray(insights?.insights)
-                                ? insights.insights.join('\\n\\n')
-                                : JSON.stringify(insights, null, 2);
-
-                    return `
-                        <div class="p-3 bg-white rounded-lg">
-                            <pre class="whitespace-pre-wrap text-gray-700">${escapeHtml(raw)}</pre>
+                if (analysisDetails) analysisDetails.innerHTML = '';
+                
+                // Show mode-specific message
+                if (result && result.message && analysisDetails) {
+                    analysisDetails.innerHTML += `
+                        <div class="result-box bg-blue-50 rounded-xl p-5">
+                            <div class="flex items-center gap-3 mb-2">
+                                <i class="fas fa-info-circle text-blue-600"></i>
+                                <h4 class="font-bold text-lg text-gray-800">${result.type === 'ai' ? 'AI Analysis' : result.type === 'tutor' ? 'Tutor Mode' : 'Auto Analysis'}</h4>
+                            </div>
+                            <p class="text-gray-700">${result.message}</p>
                         </div>
                     `;
                 }
-
-                function showError(message) {
-                    statusText.textContent = 'Error';
-                    progressBar.style.width = '0%';
-                    
-                    setTimeout(() => {
-                        statusBox.classList.add('hidden');
-                        analyzeBtn.disabled = false;
-                    }, 3000);
-                    
-                    alert(`Error: ${message}`);
+                
+                if (result && result.solution && result.solution.arg1 && solutionSection) {
+                    solutionSection.classList.remove('hidden');
+                    const cmd = `./${currentFile.name} '${result.solution.arg1}' '${result.solution.arg2 || ''}'`.trim();
+                    if (solutionCommand) solutionCommand.textContent = cmd;
                 }
                 
-                function copySolution() {
+                if (result && result.analysis && analysisDetails) {
+                    analysisDetails.innerHTML += `
+                        <div class="result-box bg-gray-50 rounded-xl p-5">
+                            <h4 class="font-bold text-lg mb-3"><i class="fas fa-info-circle mr-2"></i>Analysis Summary</h4>
+                            <div class="space-y-2">
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Technique:</span>
+                                    <span class="font-semibold">${result.analysis.technique || 'Unknown'}</span>
+                                </div>
+                                <div class="flex justify-between">
+                                    <span class="text-gray-600">Confidence:</span>
+                                    <span class="font-semibold">${result.analysis.confidence || 0}</span>
+                                </div>
+                                ${result.analysis.message ? `
+                                <div class="mt-2 p-3 bg-yellow-50 rounded-lg">
+                                    <span class="text-yellow-700">${result.analysis.message}</span>
+                                </div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (result && result.file_info && analysisDetails) {
+                    analysisDetails.innerHTML += `
+                        <div class="result-box bg-blue-50 rounded-xl p-5">
+                            <h4 class="font-bold text-lg mb-3"><i class="fas fa-file mr-2"></i>File Information</h4>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div class="p-3 bg-white rounded-lg">
+                                    <div class="text-sm text-gray-600">Filename</div>
+                                    <div class="font-medium">${result.file_info.filename}</div>
+                                </div>
+                                <div class="p-3 bg-white rounded-lg">
+                                    <div class="text-sm text-gray-600">Size</div>
+                                    <div class="font-medium">${(result.file_info.size / 1024).toFixed(1)} KB</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (currentMode === 'tutor' && result && result.hints && analysisDetails) {
+                    analysisDetails.innerHTML += `
+                        <div class="result-box bg-purple-50 rounded-xl p-5">
+                            <h4 class="font-bold text-lg mb-3"><i class="fas fa-lightbulb mr-2"></i>Educational Hints</h4>
+                            <div class="space-y-3">
+                                ${result.hints.map((hint, i) => `
+                                    <div class="flex items-start gap-3 p-4 bg-white rounded-xl">
+                                        <div class="p-2 bg-purple-100 rounded-lg">
+                                            <span class="font-bold text-purple-700">${i + 1}</span>
+                                        </div>
+                                        <p class="text-gray-700">${hint}</p>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (currentMode === 'ai' && result && result.insights && analysisDetails) {
+                    analysisDetails.innerHTML += `
+                        <div class="result-box bg-indigo-50 rounded-xl p-5">
+                            <h4 class="font-bold text-lg mb-3"><i class="fas fa-robot mr-2"></i>AI Insights</h4>
+                            <div class="space-y-3">
+                                ${formatInsights(result.insights)}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                if (result && result.transforms && result.transforms.length > 0 && analysisDetails) {
+                    analysisDetails.innerHTML += `
+                        <div class="result-box bg-green-50 rounded-xl p-5">
+                            <h4 class="font-bold text-lg mb-3"><i class="fas fa-cog mr-2"></i>Detected Transformations</h4>
+                            <div class="space-y-2">
+                                ${result.transforms.map(t => `
+                                    <div class="flex items-center gap-3 p-3 bg-white rounded-lg">
+                                        <span class="px-2 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded">
+                                            ${t.type.toUpperCase()}
+                                        </span>
+                                        <span class="flex-1 text-gray-700">${t.description || ''}</span>
+                                        ${t.value ? `<span class="text-gray-500">${t.value}</span>` : ''}
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+            
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            function formatInsights(insights) {
+                const raw = typeof insights === 'string'
+                    ? insights
+                    : typeof insights?.insights === 'string'
+                        ? insights.insights
+                        : Array.isArray(insights?.insights)
+                            ? insights.insights.join('\\n\\n')
+                            : JSON.stringify(insights, null, 2);
+
+                return `
+                    <div class="p-3 bg-white rounded-lg">
+                        <pre class="whitespace-pre-wrap text-gray-700">${escapeHtml(raw)}</pre>
+                    </div>
+                `;
+            }
+
+            function showError(message) {
+                if (statusText) statusText.textContent = 'Error';
+                if (progressBar && progressBar.querySelector('div')) {
+                    progressBar.querySelector('div').style.width = '0%';
+                }
+                
+                setTimeout(() => {
+                    if (statusBox) statusBox.classList.add('hidden');
+                    if (analyzeBtn) analyzeBtn.disabled = false;
+                }, 3000);
+                
+                alert(`Error: ${message}`);
+            }
+            
+            function copySolution() {
+                if (solutionCommand) {
                     navigator.clipboard.writeText(solutionCommand.textContent)
                         .then(() => {
                             const originalText = copyBtn.textContent;
@@ -1449,11 +2187,11 @@ async def serve_ui():
                             console.error('Copy failed:', err);
                         });
                 }
-            });
-        </script>
-    </body>
-    </html>
-    """
+            }
+        });
+    </script>
+</body>
+</html>"""
     return HTMLResponse(content=html_content)
 
 if __name__ == "__main__":
