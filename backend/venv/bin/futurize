@@ -1,0 +1,8 @@
+#!/bin/sh
+'''exec' "/Users/user_1/Desktop/Basics of Reverse Engineering/revcopilot/backend/venv/bin/python" "$0" "$@"
+' '''
+import sys
+from libfuturize.main import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

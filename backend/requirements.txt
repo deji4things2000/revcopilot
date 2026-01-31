@@ -6,3 +6,4 @@ pydantic
 python-multipart
 langchain-dartmouth  # Add this
 python-dotenv  # Add this for environment variables
+aiofiles
