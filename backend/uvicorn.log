@@ -1,2 +1,8 @@
-INFO:     Will watch for changes in these directories: ['/Users/user_1/Desktop/Basics of Reverse Engineering/revcopilot/backend']
-ERROR:    [Errno 48] Address already in use
+INFO:     Started server process [26029]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:61490 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61490 - "GET /api/tools/check HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61518 - "POST /api/ai/health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61518 - "POST /api/analyze HTTP/1.1" 200 OK

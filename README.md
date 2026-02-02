@@ -38,17 +38,22 @@ RevCopilot is an advanced AI-powered reverse engineering platform designed to he
 ```bash
 # Clone repository
 git clone <your-repo-url>
-cd revcopilot/backend
+cd revcopilot
+
+# Create and activate virtual environment
+python -m venv .venv_revcopilot
+source .venv_revcopilot/bin/activate
 
 # Install dependencies
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 
 # Set up environment variables
-cp .env.example .env
-# Edit .env with your Dartmouth API credentials
+cp backend/.env.example backend/.env
+# Edit backend/.env with your Dartmouth API credentials
 
 # Run backend server
-python main.py
+cd backend
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend Setup
@@ -69,7 +74,7 @@ docker-compose up --build
 Start the backend:
 ```bash
 cd backend
-python main.py
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 Access the web interface at http://localhost:8000
@@ -141,6 +146,25 @@ PORT=8000
 
 ### Dependencies
 See backend/requirements.txt and frontend/package.json for complete dependency lists.
+
+## 🧰 macOS GDB Dynamic Analysis Setup (Required for GDB Attach)
+
+macOS blocks GDB from attaching unless developer mode is enabled and GDB is signed.
+
+### 1) Enable Developer Tools Security
+```bash
+sudo DevToolsSecurity -enable
+sudo dseditgroup -o edit -a "$USER" -t user _developer
+```
+
+### 2) Ad-hoc sign GDB (recommended)
+```bash
+sudo codesign --force --sign - "/usr/local/Cellar/gdb/17.1/bin/gdb"
+sudo killall taskgated
+```
+
+### 3) Reboot
+Reboot your Mac, then retry the dynamic analysis.
 
 ## 📚 Usage Examples
 
