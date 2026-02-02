@@ -291,6 +291,50 @@ def detect_file_type(file_path: str) -> str:
     except:
         return "Unknown"
 
+def check_gdb_codesign() -> Dict[str, Any]:
+    """Check GDB codesign status on macOS."""
+    if sys.platform != "darwin":
+        return {
+            "platform": sys.platform,
+            "gdb_signed": None,
+            "message": "Codesign check only applies to macOS."
+        }
+
+    gdb_path = shutil.which("gdb")
+    if not gdb_path:
+        return {
+            "platform": "darwin",
+            "gdb_signed": False,
+            "message": "gdb not found on PATH."
+        }
+
+    try:
+        result = subprocess.run(
+            ["codesign", "-dv", "--verbose=4", gdb_path],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            return {
+                "platform": "darwin",
+                "gdb_signed": True,
+                "message": "gdb appears to be codesigned.",
+                "details": (result.stderr or result.stdout)[:500]
+            }
+        return {
+            "platform": "darwin",
+            "gdb_signed": False,
+            "message": "gdb is not codesigned or codesign check failed.",
+            "details": (result.stderr or result.stdout)[:500]
+        }
+    except Exception as e:
+        return {
+            "platform": "darwin",
+            "gdb_signed": False,
+            "message": f"Codesign check failed: {e}"
+        }
+
 def calculate_md5(file_path: str) -> str:
     """Calculate MD5 hash of file."""
     try:
@@ -2519,6 +2563,8 @@ async def process_analysis(job_id: str, path: str, mode: str, api_key: Optional[
                 "vulnerabilities_found": len(results.get("vulnerabilities", [])),
                 "gdb_analysis": "gdb_analysis" in results
             },
+            "gdb_analysis": results.get("gdb_analysis"),
+            "gdb_error": results.get("gdb_error"),
             "recommendations": results.get("recommendations", []),
             "solution": results.get("solution"),
             "solution_explanation": results.get("solution_explanation"),
@@ -2859,6 +2905,11 @@ async def check_tools():
             "general": "See individual tool websites for installation"
         }
     }
+
+@app.get("/api/tools/gdb_status")
+async def gdb_status():
+    """Detailed GDB readiness check (codesign on macOS)."""
+    return check_gdb_codesign()
 
 # ==================== WEB UI ====================
 
@@ -3542,6 +3593,27 @@ async def serve_ui():
                     gdbStatus.textContent = 'Not Installed';
                     gdbStatus.className = 'ml-auto text-sm font-normal px-2 py-1 bg-red-100 text-red-800 rounded';
                 }
+
+                // macOS codesign readiness
+                const gdbCheck = await fetch('/api/tools/gdb_status');
+                const gdbStatusInfo = await gdbCheck.json();
+                if (gdbStatusInfo.platform === 'darwin' && gdbStatusInfo.gdb_signed === false) {
+                    gdbContent.innerHTML = `
+                        <div class="space-y-2">
+                            <div class="flex items-center gap-2 text-red-600">
+                                <i class="fas fa-exclamation-circle"></i>
+                                <span class="font-medium">GDB not codesigned</span>
+                            </div>
+                            <div class="text-sm text-gray-700">macOS blocks GDB without codesigning. Use these steps:</div>
+                            <ol class="text-xs text-gray-700 list-decimal ml-5 space-y-1">
+                                <li>Create a signing cert named <strong>gdb-cert</strong> in Keychain Access (Self-Signed, Code Signing).</li>
+                                <li>Trust it for Code Signing.</li>
+                                <li>Run: <code>codesign -s gdb-cert --timestamp=none $(which gdb)</code></li>
+                                <li>Open System Settings → Privacy & Security → allow gdb if prompted.</li>
+                            </ol>
+                        </div>
+                    `;
+                }
             } catch (error) {
                 console.error('Failed to check tools:', error);
             }
@@ -3792,6 +3864,17 @@ async def serve_ui():
                                 </div>
                             </div>
                         ` : ''}
+                    </div>
+                `;
+            } else {
+                const gdbError = results.gdb_error || gdbAnalysis.error || 'GDB analysis did not run or failed.';
+                gdbContent.innerHTML = `
+                    <div class="space-y-2">
+                        <div class="flex items-center gap-2 text-red-600">
+                            <i class="fas fa-exclamation-circle"></i>
+                            <span class="font-medium">GDB analysis unavailable</span>
+                        </div>
+                        <div class="text-sm text-gray-700">${escapeHtml(gdbError)}</div>
                     </div>
                 `;
             }

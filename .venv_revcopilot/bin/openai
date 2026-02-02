@@ -2,7 +2,7 @@
 '''exec' "/Users/user_1/Desktop/Basics of Reverse Engineering/revcopilot/.venv_revcopilot/bin/python" "$0" "$@"
 ' '''
 import sys
-from angr.__main__ import main
+from openai.cli import main
 if __name__ == '__main__':
     if sys.argv[0].endswith('.exe'):
         sys.argv[0] = sys.argv[0][:-4]
